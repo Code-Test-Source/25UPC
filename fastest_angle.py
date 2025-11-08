@@ -15,6 +15,9 @@ class ArtillerySolver3D:
         self.drag_coeff = 0.47            # Sphere drag coefficient
         self.air_density = 1.2             # Air density [kg/m³]
         self.gravity = 9.807                 # Gravity [m/s²]
+        # Speed of sound used to compute Mach number for high-speed drag model [m/s]
+        # Use 340 m/s as a practical threshold (close to standard sea-level value)
+        self.speed_of_sound = 340.0
         self.k_drag = 0.5 * self.air_density * self.drag_coeff * self.area
         
         # Cannon constraints
@@ -28,24 +31,50 @@ class ArtillerySolver3D:
         _ground_collision_event.direction = -1
         self.ground_collision_event = _ground_collision_event
     def wind_force(self, velocity, wind_velocity):
-        """Calculate wind-induced force on projectile"""
-        relative_velocity = velocity - wind_velocity
-        speed = np.linalg.norm(relative_velocity)
-        
-        if speed < 1e-10:
-            return np.zeros(3)
-        # Use speed-dependent drag coefficient to account for turbulent regime changes.
-        # Cd varies with speed; piecewise interpolate between representative values:
-        # at low speed Cd ~ 0.9, around mid-range Cd ~ 0.47, at high speed Cd ~ 0.1
-        cd = self.drag_coeff_for_speed(speed)
+                """Calculate wind-induced force on projectile.
 
-        # Drag force magnitude (quadratic in speed)
-        drag_magnitude = 0.5 * self.air_density * cd * self.area * speed**2
+                Below ~340 m/s we use the empirical speed-dependent Cd(s). Above that
+                threshold we switch to a Mach-based Cd(Ma) model.
+                """
+                relative_velocity = velocity - wind_velocity
+                speed = np.linalg.norm(relative_velocity)
 
-        # Direction of drag force (opposite to relative velocity)
-        drag_direction = -relative_velocity / speed
+                if speed < 1e-10:
+                        return np.zeros(3)
 
-        return drag_magnitude * drag_direction
+                # Select drag-coefficient model depending on speed
+                if speed <= 340.0:
+                        cd = self.drag_coeff_for_speed(speed)
+                else:
+                        mach = speed / float(self.speed_of_sound)
+                        cd = self.drag_coeff_for_mach(mach)
+
+                # Drag force magnitude (quadratic in speed)
+                drag_magnitude = 0.5 * self.air_density * cd * self.area * speed**2
+
+                # Direction of drag force (opposite to relative velocity)
+                drag_direction = -relative_velocity / speed
+
+                return drag_magnitude * drag_direction
+
+    def drag_coeff_for_mach(self, mach):
+                """Estimate drag coefficient Cd as a function of Mach number.
+
+                This is a simple piecewise-linear approximation intended to capture the
+                transonic/supersonic rise in drag coefficient near Ma~1 and then a
+                gradual decline at higher Mach numbers. Anchors are tunable.
+
+                NOTES/ASSUMPTIONS:
+                - We use a pragmatic anchor set because a full compressible-flow Cd(Ma)
+                    curve requires experimental data and depends on projectile shape.
+                - Anchors (Ma -> Cd): 0.95->0.50, 1.00->1.20 (transonic spike),
+                    1.20->0.90, 2.00->0.50, 5.00->0.30
+                - If you have measured Cd vs Ma for your projectile, replace these
+                    anchor points with that dataset.
+                """
+                m = max(0.0, float(mach))
+                # piecewise linear interpolation over Mach anchors
+                return float(np.interp(m, [0.95, 1.00, 1.20, 2.00, 5.00], [0.50, 1.20, 0.90, 0.50, 0.30]))
 
     def drag_coeff_for_speed(self, speed):
         """Return an estimated drag coefficient Cd as a function of relative speed.
@@ -158,7 +187,7 @@ class ArtillerySolver3D:
         
         # Check constraints
         if (muzzle_velocity < 100 or muzzle_velocity > self.max_muzzle_velocity or
-            elevation_angle < 1 or elevation_angle > 80 or
+            elevation_angle < 1 or elevation_angle > 25 or
             azimuth_angle < -180 or azimuth_angle > 180):
             return float('inf')
         
@@ -183,7 +212,7 @@ class ArtillerySolver3D:
         Find optimal firing parameters using hybrid optimization
         """
         # Parameter bounds for differential_evolution (list of (min,max) pairs)
-        de_bounds = [(100, self.max_muzzle_velocity), (1, 80), (-180, 180)]
+        de_bounds = [(100, self.max_muzzle_velocity), (1, 25), (-180, 180)]
         
         # Phase 1: Global optimization
         # Use moderate DE settings to keep runs responsive; increase for production runs
@@ -207,7 +236,7 @@ class ArtillerySolver3D:
                 global_result.x,
                 args=(target_distance, initial_altitude, wind_velocity),
                 method='SLSQP',
-                bounds=[(100, self.max_muzzle_velocity), (1, 80), (-180, 180)],
+                bounds=[(100, self.max_muzzle_velocity), (1, 25), (-180, 180)],
                 options={'ftol': 1e-6, 'maxiter': 200}
             )
             
@@ -224,6 +253,63 @@ class ArtillerySolver3D:
             )
         
         return optimal_params, final_error
+
+    def optimize_fastest_solution(self, target_distance, initial_altitude, wind_velocity, error_tol=1.0):
+        """
+        Find firing parameters that hit the target within `error_tol` meters and minimize flight time.
+
+        Strategy:
+        - Use a penalty objective: if miss error > error_tol return a large penalty.
+        - Otherwise return the flight time (lower is better).
+        - Global search (DE) followed by local refine (SLSQP) for speed.
+        """
+        def time_objective(params, td, ia, wv):
+            v0, elev, az = params
+            # enforce simple bounds cheaply
+            if v0 < 100 or v0 > self.max_muzzle_velocity or elev < 1 or elev > 25 or az < -180 or az > 180:
+                return 1e9
+            sol = self.simulate_trajectory(v0, elev, az, wv, ia, td)
+            impact_pos, impact_time, err = self.calculate_impact(sol, td)
+            if impact_pos is None or not np.isfinite(err):
+                return 1e9
+            # If miss too large, penalize heavily but keep gradient-friendly number
+            if err > error_tol:
+                return 1e6 + err * 1e3
+            # valid solution: minimize flight time (if None -> large penalty)
+            return float(impact_time if impact_time is not None else 1e6)
+
+        bounds = [(100, self.max_muzzle_velocity), (1, 25), (-180, 180)]
+
+        de_bounds = bounds
+        global_result = differential_evolution(
+            time_objective,
+            de_bounds,
+            args=(target_distance, initial_altitude, wind_velocity),
+            strategy='best1bin',
+            maxiter=25,
+            popsize=12,
+            tol=0.1,
+            seed=123,
+            polish=False,
+            disp=False,
+        )
+
+        # local refine only if global returned a reasonable point
+        best_x = global_result.x
+        local_result = minimize(
+            time_objective,
+            best_x,
+            args=(target_distance, initial_altitude, wind_velocity),
+            method='SLSQP',
+            bounds=bounds,
+            options={'ftol': 1e-6, 'maxiter': 200}
+        )
+
+        final_x = local_result.x if local_result.success else global_result.x
+        # get impact info
+        sol = self.simulate_trajectory(final_x[0], final_x[1], final_x[2], wind_velocity, initial_altitude, target_distance)
+        impact_pos, impact_time, err = self.calculate_impact(sol, target_distance)
+        return final_x, float(impact_time if impact_time is not None else 1e9), float(err if np.isfinite(err) else 1e9)
     
     def direct_optimization(self, target_distance, initial_altitude, wind_velocity):
         """Direct optimization using multiple starting points"""
@@ -232,14 +318,14 @@ class ArtillerySolver3D:
         
         # Try different initial guesses
         initial_guesses = [
-            [100, 30, 0],
-            [200, 30, 0],
-            [300, 30, 0],
-            [400, 30, 0],   # Medium velocity, medium angle, straight
-            [450, 20, 0],   # High velocity, low angle
-            [350, 45, 0],   # Lower velocity, high angle
-            [400, 25, 10],  # With azimuth compensation
-            [400, 25, -10]  # Opposite azimuth
+            [100, 20, 0],
+            [200, 20, 0],
+            [300, 20, 0],
+            [400, 20, 0],   # Medium velocity, medium angle, straight
+            [450, 15, 0],   # High velocity, low angle
+            [350, 25, 0],   # Upper-bound angle candidate
+            [400, 20, 10],  # With azimuth compensation
+            [400, 20, -10]  # Opposite azimuth
         ]
         
         for guess in initial_guesses:
@@ -248,7 +334,7 @@ class ArtillerySolver3D:
                 guess,
                 args=(target_distance, initial_altitude, wind_velocity),
                 method='SLSQP',
-                bounds=[(100, self.max_muzzle_velocity), (1, 80), (-180, 180)],
+                bounds=[(100, self.max_muzzle_velocity), (1, 25), (-180, 180)],
                 options={'ftol': 1e-6, 'maxiter': 100}
             )
             
@@ -257,14 +343,14 @@ class ArtillerySolver3D:
                 best_params = result.x
         
         if best_params is None:
-            # Default fallback
-            best_params = [400, 30, 0]
+            # Default fallback (respect new elevation cap)
+            best_params = [400, 20, 0]
             best_error = self.firing_error(best_params, target_distance, initial_altitude, wind_velocity)
         
         # Run a quick coarse search to discover other feasible solutions (may find lower-velocity or faster-time hits)
         candidates = self.find_candidates_coarse(target_distance, initial_altitude, wind_velocity,
                                                  v_min=100, v_max=self.max_muzzle_velocity, v_step=50,
-                                                 elev_min=1, elev_max=80, elev_step=2,
+                                                 elev_min=1, elev_max=25, elev_step=2,
                                                  azim_choices=[-10, -5, 0, 5, 10],
                                                  error_tol=max(5.0, best_error + 1.0))
 
@@ -631,9 +717,9 @@ def main():
         muzzle_vel, elevation, azimuth, wind_velocity, initial_altitude, target_distance
     )
     
-    # Wind effect analysis
-    print("\nCOMPREHENSIVE WIND EFFECT ANALYSIS")
-    wind_analysis = artillery.analyze_wind_effect(1200, initial_altitude, 10)
+    # # Wind effect analysis
+    # print("\nCOMPREHENSIVE WIND EFFECT ANALYSIS")
+    # wind_analysis = artillery.analyze_wind_effect(1200, initial_altitude, 10)
     
     # Generate firing table for practical use
     print("\nPRACTICAL FIRING TABLE")

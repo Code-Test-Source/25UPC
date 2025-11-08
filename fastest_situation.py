@@ -34,30 +34,14 @@ class ArtillerySolver3D:
         
         if speed < 1e-10:
             return np.zeros(3)
-        # Use speed-dependent drag coefficient to account for turbulent regime changes.
-        # Cd varies with speed; piecewise interpolate between representative values:
-        # at low speed Cd ~ 0.9, around mid-range Cd ~ 0.47, at high speed Cd ~ 0.1
-        cd = self.drag_coeff_for_speed(speed)
-
-        # Drag force magnitude (quadratic in speed)
-        drag_magnitude = 0.5 * self.air_density * cd * self.area * speed**2
-
+            
+        # Drag force magnitude
+        drag_magnitude = self.k_drag * speed**2
+        
         # Direction of drag force (opposite to relative velocity)
         drag_direction = -relative_velocity / speed
-
+        
         return drag_magnitude * drag_direction
-
-    def drag_coeff_for_speed(self, speed):
-        """Return an estimated drag coefficient Cd as a function of relative speed.
-
-        This uses a simple piecewise-linear interpolation between three anchor points
-        to approximate the effect of changing flow/turbulence regimes.
-        Tunable anchor points: (0 m/s -> 0.9), (150 m/s -> 0.47), (500 m/s -> 0.1).
-        """
-        # clamp speed to non-negative
-        s = max(0.0, float(speed))
-        # piecewise linear interpolation
-        return float(np.interp(s, [0.0, 150.0, 500.0], [0.9, 0.47, 0.1]))
     
     def projectile_dynamics(self, t, state, muzzle_velocity, elevation_angle, azimuth_angle, wind_velocity):
         """
@@ -174,9 +158,9 @@ class ArtillerySolver3D:
         if impact_pos is None or not np.isfinite(error):
             return 1e6
 
-        # Return only the distance error. Do not penalize flight time here; we are not
-        # trying to prefer the fastest solution, only the one that minimizes miss distance.
-        return error
+        # Small time penalty to prefer faster (shorter flight time) solutions when errors are similar
+        time_penalty_coeff = 1e-2  # 0.01 m error per second; tuned small so distance dominates
+        return error + time_penalty_coeff * float(impact_time if impact_time is not None else 0.0)
     
     def optimize_firing_solution(self, target_distance, initial_altitude, wind_velocity):
         """

@@ -15,6 +15,9 @@ class ArtillerySolver3D:
         self.drag_coeff = 0.47            # Sphere drag coefficient
         self.air_density = 1.2             # Air density [kg/m³]
         self.gravity = 9.807                 # Gravity [m/s²]
+        # Speed of sound used to compute Mach number for high-speed drag model [m/s]
+        # Use 340 m/s as a practical threshold (close to standard sea-level value)
+        self.speed_of_sound = 340.0
         self.k_drag = 0.5 * self.air_density * self.drag_coeff * self.area
         
         # Cannon constraints
@@ -28,24 +31,50 @@ class ArtillerySolver3D:
         _ground_collision_event.direction = -1
         self.ground_collision_event = _ground_collision_event
     def wind_force(self, velocity, wind_velocity):
-        """Calculate wind-induced force on projectile"""
-        relative_velocity = velocity - wind_velocity
-        speed = np.linalg.norm(relative_velocity)
-        
-        if speed < 1e-10:
-            return np.zeros(3)
-        # Use speed-dependent drag coefficient to account for turbulent regime changes.
-        # Cd varies with speed; piecewise interpolate between representative values:
-        # at low speed Cd ~ 0.9, around mid-range Cd ~ 0.47, at high speed Cd ~ 0.1
-        cd = self.drag_coeff_for_speed(speed)
+                """Calculate wind-induced force on projectile.
 
-        # Drag force magnitude (quadratic in speed)
-        drag_magnitude = 0.5 * self.air_density * cd * self.area * speed**2
+                Below ~340 m/s we use the empirical speed-dependent Cd(s). Above that
+                threshold we switch to a Mach-based Cd(Ma) model.
+                """
+                relative_velocity = velocity - wind_velocity
+                speed = np.linalg.norm(relative_velocity)
 
-        # Direction of drag force (opposite to relative velocity)
-        drag_direction = -relative_velocity / speed
+                if speed < 1e-10:
+                        return np.zeros(3)
 
-        return drag_magnitude * drag_direction
+                # Select drag-coefficient model depending on speed
+                if speed <= 340.0:
+                        cd = self.drag_coeff_for_speed(speed)
+                else:
+                        mach = speed / float(self.speed_of_sound)
+                        cd = self.drag_coeff_for_mach(mach)
+
+                # Drag force magnitude (quadratic in speed)
+                drag_magnitude = 0.5 * self.air_density * cd * self.area * speed**2
+
+                # Direction of drag force (opposite to relative velocity)
+                drag_direction = -relative_velocity / speed
+
+                return drag_magnitude * drag_direction
+
+    def drag_coeff_for_mach(self, mach):
+                """Estimate drag coefficient Cd as a function of Mach number.
+
+                This is a simple piecewise-linear approximation intended to capture the
+                transonic/supersonic rise in drag coefficient near Ma~1 and then a
+                gradual decline at higher Mach numbers. Anchors are tunable.
+
+                NOTES/ASSUMPTIONS:
+                - We use a pragmatic anchor set because a full compressible-flow Cd(Ma)
+                    curve requires experimental data and depends on projectile shape.
+                - Anchors (Ma -> Cd): 0.95->0.50, 1.00->1.20 (transonic spike),
+                    1.20->0.90, 2.00->0.50, 5.00->0.30
+                - If you have measured Cd vs Ma for your projectile, replace these
+                    anchor points with that dataset.
+                """
+                m = max(0.0, float(mach))
+                # piecewise linear interpolation over Mach anchors
+                return float(np.interp(m, [0.95, 1.00, 1.20, 2.00, 5.00], [0.50, 1.20, 0.90, 0.50, 0.30]))
 
     def drag_coeff_for_speed(self, speed):
         """Return an estimated drag coefficient Cd as a function of relative speed.
@@ -631,9 +660,9 @@ def main():
         muzzle_vel, elevation, azimuth, wind_velocity, initial_altitude, target_distance
     )
     
-    # Wind effect analysis
-    print("\nCOMPREHENSIVE WIND EFFECT ANALYSIS")
-    wind_analysis = artillery.analyze_wind_effect(1200, initial_altitude, 10)
+    # # Wind effect analysis
+    # print("\nCOMPREHENSIVE WIND EFFECT ANALYSIS")
+    # wind_analysis = artillery.analyze_wind_effect(1200, initial_altitude, 10)
     
     # Generate firing table for practical use
     print("\nPRACTICAL FIRING TABLE")

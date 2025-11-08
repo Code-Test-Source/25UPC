@@ -12,7 +12,7 @@ eps = 0.622         # R_d / R_v
 
 
 def saturation_vapor_pressure_pa(T_C):
-    """Magnus-Tetens approximate saturation vapor pressure over liquid water.
+    """Tetens approximate saturation vapor pressure over liquid water.
 
     T_C: temperature in degC (scalar or numpy array)
     returns: e_s in Pa
@@ -20,8 +20,8 @@ def saturation_vapor_pressure_pa(T_C):
     T_C = np.asarray(T_C)
     # Magnus parameters (valid roughly -40..+50 C)
     a = 17.27
-    b = 237.7
-    e_s_hPa = 6.112 * np.exp(a * T_C / (b + T_C))
+    b = 237.3
+    e_s_hPa = 6.1078 * np.exp(a * T_C / (b + T_C))
     return e_s_hPa * 100.0  # hPa -> Pa (6.112 was in hPa)
 
 

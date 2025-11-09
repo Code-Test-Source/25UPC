@@ -25,6 +25,36 @@ def saturation_vapor_pressure_pa(T_C):
     return e_s_hPa * 100.0  # hPa -> Pa (6.112 was in hPa)
 
 
+def air_density_ideal(T_C, RH, P_pa=101325.0):
+    """Compute moist air density from temperature and relative humidity using ideal gas law.
+
+    Formula:
+      e = RH_frac * e_s(T)
+      p_d = P - e
+      rho = p_d / (R_d * T_K) + e / (R_v * T_K)
+
+    T_C: degC (scalar or array)
+    RH: 0..1 or 0..100
+    P_pa: total pressure in Pa (default standard sea-level)
+    """
+    T_C = np.asarray(T_C)
+    T_K = T_C + 273.15
+
+    RHf = float(RH)
+    if RHf > 1.0 and RHf <= 100.0:
+        RHf = RHf / 100.0
+    if not (0.0 <= RHf <= 1.0):
+        raise ValueError('RH must be in 0..1 or 0..100')
+
+    e_s = saturation_vapor_pressure_pa(T_C)
+    e = RHf * e_s
+
+    p_d = P_pa - e
+    rho_d = p_d / (R_d * T_K)
+    rho_v = e / (R_v * T_K)
+    return rho_d + rho_v
+
+
 def air_density(T0_C, RH0, P0_pa, h0=0.0, h=0.0, lapse_rate=L_DEFAULT):
     """Compute air density at height h given conditions at height h0.
 
@@ -160,6 +190,67 @@ def plot_density_vs_height(
 
     if out_path is None:
         out_path = Path(__file__).with_name('density_vs_height.png')
+
+    fig.tight_layout()
+    fig.savefig(str(out_path), dpi=150)
+    return fig, ax
+
+
+def plot_density_vs_pressure(
+    pressures=np.linspace(80000.0, 105000.0, 201),
+    temps=(10.0, 15.0, 20.0, 25.0, ),
+    humidities=(0.0, ),
+    h0=0.0,
+    h=0.0,
+    out_path=None,
+):
+    """Plot air density vs pressure for given temperature(s) and humidity(ies).
+
+    - pressures: array of pressures (Pa)
+    - temps: iterable of temperatures in degC. If multiple temps and humidities have equal length, they
+      are paired; otherwise behavior follows rules below.
+    - humidities: iterable of RH values (percent or 0..1)
+    - h0/h: unused for ideal calculation, kept for API similarity
+    """
+    plt.style.use('ggplot')
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    pressures = np.asarray(pressures)
+
+    temps_list = list(temps)
+    hums_list = list(humidities)
+
+    # Determine plotting cases:
+    cases = []
+    if len(temps_list) == len(hums_list):
+        # pairwise
+        for T, RH in zip(temps_list, hums_list):
+            cases.append((T, RH, f'T={T}°C, RH={RH}%'))
+    elif len(hums_list) == 1:
+        # same RH for multiple temps
+        for T in temps_list:
+            cases.append((T, hums_list[0], f'T={T}°C, RH={hums_list[0]}%'))
+    elif len(temps_list) == 1:
+        # same temp for multiple RH
+        for RH in hums_list:
+            cases.append((temps_list[0], RH, f'T={temps_list[0]}°C, RH={RH}%'))
+    else:
+        # fallback: pair first N where possible
+        n = min(len(temps_list), len(hums_list))
+        for i in range(n):
+            cases.append((temps_list[i], hums_list[i], f'T={temps_list[i]}°C, RH={hums_list[i]}%'))
+
+    for T, RH, label in cases:
+        rho = air_density_ideal(T, RH, P_pa=pressures)
+        ax.plot(pressures / 100.0, rho, label=label)  # plot pressure in hPa for readability
+
+    ax.set_xlabel('Pressure (hPa)')
+    ax.set_ylabel('Air density (kg/m³)')
+    ax.set_title('Air density vs Pressure')
+    ax.legend()
+
+    if out_path is None:
+        out_path = Path(__file__).with_name('density_vs_pressure.png')
 
     fig.tight_layout()
     fig.savefig(str(out_path), dpi=150)
